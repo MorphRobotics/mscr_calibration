@@ -59,11 +59,15 @@ def train(cfg: dict) -> None:
 
     net = MoSSNet(cfg["model"]["n_points"], cfg["model"]["pretrained"]).to(device)
     opt = torch.optim.AdamW(net.parameters(), lr=tc["lr"], weight_decay=tc["weight_decay"])
+    # Cosine LR decay so the optimizer settles instead of bouncing at a fixed LR.
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=tc["epochs"])
     lam = tc["lambda_length"]
+    patience = tc.get("early_stop_patience", 0)  # 0 disables early stopping
 
     ckpt = Path(__file__).parent / tc["ckpt"]
     ckpt.parent.mkdir(parents=True, exist_ok=True)
     best = float("inf")
+    since_best = 0
     for ep in range(tc["epochs"]):
         net.train()
         for img, r_s, L in tr:
@@ -73,13 +77,21 @@ def train(cfg: dict) -> None:
             loss = loss_fn(pts, Lp, r_s, L, lam)
             loss.backward()
             opt.step()
+        sched.step()
         vl, vme, vte = evaluate(net, va, device, lam)
         flag = ""
         if vme < best:
             best = vme
+            since_best = 0
             torch.save({"model": net.state_dict(), "config": cfg}, ckpt)
             flag = " *"
-        print(f"epoch {ep:3d}  val_loss={vl:.3f}  mean_err={vme:.2f}mm  tip_err={vte:.2f}mm{flag}")
+        else:
+            since_best += 1
+        print(f"epoch {ep:3d}  lr={sched.get_last_lr()[0]:.2e}  val_loss={vl:.3f}  "
+              f"mean_err={vme:.2f}mm  tip_err={vte:.2f}mm{flag}")
+        if patience and since_best >= patience:
+            print(f"early stop: no val improvement for {patience} epochs (best {best:.2f}mm)")
+            break
 
     # final test metrics with the best checkpoint
     net.load_state_dict(torch.load(ckpt, map_location=device)["model"])
