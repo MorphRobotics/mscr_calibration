@@ -38,19 +38,73 @@ Segmenter = Callable[[np.ndarray, dict], np.ndarray]
 # --------------------------------------------------------------------------- #
 # 2. Segmentation  (swappable — a learned segmenter can replace this)
 # --------------------------------------------------------------------------- #
+def _pick_rod_component(mask: np.ndarray, min_area: int) -> np.ndarray:
+    """Keep the most rod-like connected component.
+
+    The rod is a long thin streak, so score each component by elongation
+    (bbox longer-side / shorter-side) weighted by sqrt(area). This beats
+    'largest blob', which is fooled by hands, shirts, or vignette corners.
+    """
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    if n <= 1:
+        return np.zeros_like(mask)
+    best, best_score = 0, -1.0
+    for i in range(1, n):
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area < min_area:
+            continue
+        w, h = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+        elong = max(w, h) / max(1, min(w, h))
+        score = elong * np.sqrt(area)
+        if score > best_score:
+            best_score, best = score, i
+    if best == 0:
+        return np.zeros_like(mask)
+    return ((labels == best) * 255).astype(np.uint8)
+
+
 def threshold_segmenter(gray: np.ndarray, params: dict) -> np.ndarray:
-    """Inverse threshold (rod is dark) + morph open/close + largest CC."""
+    """Inverse threshold (rod is dark) + morph open/close + most rod-like CC."""
     _, mask = cv2.threshold(gray, params["inv_threshold"], 255, cv2.THRESH_BINARY_INV)
     k = params["morph_kernel"]
     it = params["morph_iterations"]
     se = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, se, iterations=it)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, se, iterations=it)
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
-    if n <= 1:
-        return np.zeros_like(mask)
-    largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-    return ((labels == largest) * 255).astype(np.uint8)
+    return _pick_rod_component(mask, params.get("min_component_area", 50))
+
+
+def blackhat_segmenter(gray: np.ndarray, params: dict) -> np.ndarray:
+    """Robust rod segmentation via black-hat morphology.
+
+    Black-hat = closing(img) - img highlights thin DARK structures on a lighter
+    background, independent of absolute brightness and slow illumination/vignette
+    gradients. We then Otsu-threshold the response and keep the most elongated
+    component. Far more robust than a global inverse threshold when rod contrast
+    is low or the frame vignettes (as real D435 IR does).
+    """
+    ksz = params.get("blackhat_kernel", 21)
+    se = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksz, ksz))
+    bh = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, se)
+    bh = cv2.GaussianBlur(bh, (3, 3), 0)
+    _, mask = cv2.threshold(bh, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    k = params["morph_kernel"]
+    sm = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, sm, iterations=params["morph_iterations"])
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, sm, iterations=params["morph_iterations"])
+    return _pick_rod_component(mask, params.get("min_component_area", 50))
+
+
+# Registry so the active segmenter is selectable from config (and a learned
+# segmenter can be registered here later).
+SEGMENTERS: dict[str, Segmenter] = {
+    "threshold": threshold_segmenter,
+    "blackhat": blackhat_segmenter,
+}
+
+
+def get_segmenter(params: dict) -> Segmenter:
+    return SEGMENTERS[params.get("segmenter", "blackhat")]
 
 
 # --------------------------------------------------------------------------- #
@@ -270,7 +324,9 @@ class LabelResult:
 
 def label_pair(left_rect: np.ndarray, right_rect: np.ndarray,
                calib: StereoCalib, lp: dict,
-               segmenter: Segmenter = threshold_segmenter) -> Optional[LabelResult]:
+               segmenter: Optional[Segmenter] = None) -> Optional[LabelResult]:
+    if segmenter is None:
+        segmenter = get_segmenter(lp)
     mask_l = segmenter(left_rect, lp)
     mask_r = segmenter(right_rect, lp)
     pl = order_skeleton(mask_l, lp["base_side"])

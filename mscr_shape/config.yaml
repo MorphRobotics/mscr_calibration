@@ -18,9 +18,10 @@ capture:
 
 labeler:
   # --- segmentation ---
-  inv_threshold: 40          # pixels darker than this are candidate rod (8-bit grayscale)
-                             # tuned to real IR: rod ~31, grey background ~87
-                             # (NB: the "white" sheet reads as mid-grey in IR, not bright)
+  segmenter: blackhat        # 'blackhat' (robust, contrast/vignette-invariant) or 'threshold'
+  blackhat_kernel: 21        # black-hat structuring element; must exceed the rod's px width
+  min_component_area: 50     # ignore connected components smaller than this (px)
+  inv_threshold: 40          # only used by the 'threshold' segmenter (rod darker than this)
   morph_kernel: 3            # structuring element size for open/close
   morph_iterations: 1
   # --- centerline ordering ---
