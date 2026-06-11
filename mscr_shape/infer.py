@@ -120,6 +120,71 @@ def run_session(net, cfg, calib, session: str, device: str, show: bool) -> None:
               f"=> {1.0/np.mean(times):.1f} FPS (network only)")
 
 
+def run_viz3d(net, cfg, calib, session: str, device: str, out_path: Path,
+              stride: int = 1, max_frames: Optional[int] = None,
+              elev: float = 18.0, azim: float = -70.0) -> None:
+    """Render the predicted 3D centerline (in the left-IR rectified camera frame)
+    as a rotating animation, with the tip's trajectory accumulating over time.
+
+    Saves an animated GIF to `out_path` and the raw predicted curve sequence to
+    a sibling .npz (r_s_seq: [T,N,3] mm, tips: [T,3] mm). This is the actual 3D
+    reconstruction — run_session only ever showed it reprojected onto the image.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation, PillowWriter
+
+    data_root = Path(cfg["paths"]["data_root"])
+    files = sorted((data_root / "raw" / session / "left").glob("*.png"))[::stride]
+    if max_frames:
+        files = files[:max_frames]
+    tf = TemporalFilter(cfg["infer"]["ema_alpha"], cfg["infer"]["max_jump_mm"])
+
+    curves: list[np.ndarray] = []
+    for f in files:
+        rect = calib.rectify_left(cv2.imread(str(f), cv2.IMREAD_GRAYSCALE))
+        pts, _ = predict(net, preprocess(rect, cfg), device)
+        smoothed, _ = tf.update(pts)
+        curves.append(smoothed.copy())
+    seq = np.stack(curves)              # [T, N, 3]
+    tips = seq[:, -1, :]               # [T, 3]
+    print(f"predicted {len(seq)} frames of 3D centerline")
+
+    # fixed axis limits across the whole sequence for a stable view
+    allpts = seq.reshape(-1, 3)
+    mins, maxs = allpts.min(0), allpts.max(0)
+    ctr = (mins + maxs) / 2
+    rng = (maxs - mins).max() / 2 * 1.1
+
+    fig = plt.figure(figsize=(7, 6))
+    ax = fig.add_subplot(111, projection="3d")
+
+    def draw(i):
+        ax.clear()
+        c = seq[i]
+        ax.plot(c[:, 0], c[:, 1], c[:, 2], "-", lw=3, color="tab:green")
+        ax.scatter(*c[0], color="black", s=40, label="base")
+        ax.scatter(*c[-1], color="red", s=40, label="tip")
+        ax.plot(tips[:i + 1, 0], tips[:i + 1, 1], tips[:i + 1, 2],
+                "-", lw=1, color="tab:red", alpha=0.6, label="tip path")
+        for a, lo, hi in zip("xyz", ctr - rng, ctr + rng):
+            getattr(ax, f"set_{a}lim")(lo, hi)
+        ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)"); ax.set_zlabel("Z (mm)")
+        ax.set_title(f"{session}  frame {i+1}/{len(seq)}  (left-IR camera frame)")
+        ax.view_init(elev=elev, azim=azim)  # fixed view (no spinning)
+        ax.legend(loc="upper right", fontsize=8)
+
+    anim = FuncAnimation(fig, draw, frames=len(seq), interval=80)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    anim.save(str(out_path), writer=PillowWriter(fps=12))
+    plt.close(fig)
+    np.savez(out_path.with_suffix(".npz"), r_s_seq=seq, tips=tips)
+    print(f"saved 3D animation -> {out_path}")
+    print(f"saved curve sequence -> {out_path.with_suffix('.npz')} "
+          f"(r_s_seq {seq.shape}, tips {tips.shape})")
+
+
 def run_live(net, cfg, calib, device: str) -> None:
     from capture import RealSenseSource
     cap = cfg["capture"]
@@ -178,6 +243,11 @@ def main() -> None:
     ap.add_argument("--session", help="run on data/raw/<session>")
     ap.add_argument("--live", action="store_true", help="run on live D435 left-IR")
     ap.add_argument("--export-onnx", action="store_true")
+    ap.add_argument("--viz3d", action="store_true",
+                    help="with --session: render the predicted 3D centerline + tip path as a GIF")
+    ap.add_argument("--out", default=None, help="output GIF path for --viz3d")
+    ap.add_argument("--stride", type=int, default=2, help="--viz3d: use every Nth frame")
+    ap.add_argument("--max-frames", type=int, default=None, help="--viz3d: cap frame count")
     ap.add_argument("--no-show", action="store_true", help="disable preview window")
     ap.add_argument("--config", default=None)
     args = ap.parse_args()
@@ -196,6 +266,12 @@ def main() -> None:
     if args.export_onnx:
         export_onnx(net, cfg, Path(__file__).parent / cfg["infer"]["onnx_path"],
                     cfg["infer"]["onnx_tol"], device)
+    elif args.viz3d:
+        if not args.session:
+            ap.error("--viz3d requires --session")
+        out = Path(args.out) if args.out else Path(__file__).parent / f"viz3d_{args.session}.gif"
+        run_viz3d(net, cfg, resolve_calib(cfg), args.session, device, out,
+                  stride=args.stride, max_frames=args.max_frames)
     elif args.live:
         run_live(net, cfg, resolve_calib(cfg), device)
     elif args.session:
