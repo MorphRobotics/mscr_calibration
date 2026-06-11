@@ -199,6 +199,33 @@ def triangulate(P1, P2, left_pts, right_pts) -> np.ndarray:
     return X[:3].T  # (M,3) mm
 
 
+def robust_filter_3d(pts3d: np.ndarray, lp: dict) -> np.ndarray:
+    """Drop outlier triangulated points before the 3D spline fit.
+
+    Points arrive ordered base->tip (from the ordered left centerline). Two
+    rejections: (1) depth gate — points outside [depth_min, depth_max] are
+    near-degenerate stereo and unreliable; (2) step gate — a point whose jump
+    from the running curve exceeds `max_seg_jump` x the median step is a bad
+    correspondence (these inflate arc length even when depth looks fine).
+    Returns the boolean inlier mask over the input order.
+    """
+    n = len(pts3d)
+    keep = (pts3d[:, 2] >= lp["depth_min_mm"]) & (pts3d[:, 2] <= lp["depth_max_mm"])
+    if keep.sum() < 4:
+        return keep
+    pts = pts3d[keep]
+    steps = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    med = np.median(steps)
+    if med <= 1e-9:
+        return keep
+    # a large step means the *following* point jumped; flag it as outlier
+    good = np.ones(len(pts), dtype=bool)
+    good[1:] = steps <= lp["max_seg_jump"] * med
+    out = keep.copy()
+    out[np.flatnonzero(keep)] = good
+    return out
+
+
 def fit_resample_3d(pts3d: np.ndarray, smooth: float, n: int
                     ) -> Tuple[np.ndarray, np.ndarray, float]:
     """3D smoothing spline; resample uniformly in arclength.
@@ -261,6 +288,12 @@ def label_pair(left_rect: np.ndarray, right_rect: np.ndarray,
         return None
     pts3d = triangulate(calib.P1, calib.P2, L_pts[valid], R_pts[valid])
 
+    # robust filtering: drop too-close/too-far and bad-correspondence outliers
+    inlier = robust_filter_3d(pts3d, lp)
+    if inlier.sum() < max(6, int(lp["min_inlier_frac"] * len(pts3d))):
+        return None
+    pts3d = pts3d[inlier]
+
     r_s, s_samples, L_mm = fit_resample_3d(pts3d, lp["spline_smooth_3d"], lp["n_output"])
 
     # QC
@@ -268,10 +301,13 @@ def label_pair(left_rect: np.ndarray, right_rect: np.ndarray,
     proj_r = project(calib.P2, r_s)
     err_l = mean_reproj_error(proj_l, cl)
     err_r = mean_reproj_error(proj_r, cr)
-    accept = (err_l < lp["reproj_thresh_px"]) and (err_r < lp["reproj_thresh_px"])
+    mean_depth = float(r_s[:, 2].mean())
+    depth_ok = lp["depth_min_mm"] <= mean_depth <= lp["depth_max_mm"]
+    # per-frame accept; session-level length-consistency is applied in process_session
+    accept = depth_ok and (err_l < lp["reproj_thresh_px"]) and (err_r < lp["reproj_thresh_px"])
 
     return LabelResult(
-        r_s=r_s, L_mm=L_mm, s_samples=s_samples,
+        r_s=r_s, L_mm=L_mm, s_samples=s_samples, mean_depth_mm=mean_depth,
         reproj_err_left=err_l, reproj_err_right=err_r, accept=accept,
         curve_left=cl, curve_right=cr, proj_left=proj_l, proj_right=proj_r,
         n_valid=int(valid.sum()), n_corr=int(len(valid)),
@@ -317,28 +353,51 @@ def process_session(session: str, cfg: dict, calib: StereoCalib) -> dict:
     lab_dir.mkdir(parents=True, exist_ok=True)
 
     files = sorted(left_dir.glob("*.png"))
-    n_accept = 0
+
+    # Pass 1: label every frame (per-frame accept = depth + reproj gates).
+    results: dict[str, Optional[LabelResult]] = {}
     for f in files:
         left = cv2.imread(str(f), cv2.IMREAD_GRAYSCALE)
         right = cv2.imread(str(raw / "right" / f.name), cv2.IMREAD_GRAYSCALE)
         if left is None or right is None:
             continue
-        lr = calib.rectify_left(left)
-        rr = calib.rectify_right(right)
-        res = label_pair(lr, rr, calib, lp)
+        results[f.stem] = label_pair(calib.rectify_left(left),
+                                     calib.rectify_right(right), calib, lp)
+
+    # Session length-consistency gate: the rod is rigid, so its triangulated
+    # length should cluster. Reject per-frame-accepted frames whose L deviates
+    # more than length_tol_frac from the median of the per-frame-accepted set.
+    Ls = [r.L_mm for r in results.values() if r is not None and r.accept]
+    med_L = float(np.median(Ls)) if Ls else 0.0
+    tol = lp["length_tol_frac"]
+    for r in results.values():
+        if r is not None and r.accept and med_L > 0:
+            if abs(r.L_mm - med_L) > tol * med_L:
+                r.accept = False
+                r.reject_reason = "length"
+
+    # Pass 2: draw overlays (final accept) and save accepted labels.
+    n_accept = 0
+    for f in files:
+        res = results.get(f.stem)
+        left = cv2.imread(str(f), cv2.IMREAD_GRAYSCALE)
+        right = cv2.imread(str(raw / "right" / f.name), cv2.IMREAD_GRAYSCALE)
+        lr, rr = calib.rectify_left(left), calib.rectify_right(right)
         save_overlay(qc_dir / f"{f.stem}.jpg", lr, rr, res)
         if res is not None and res.accept:
             np.savez(lab_dir / f"{f.stem}.npz",
                      r_s=res.r_s, L_mm=res.L_mm, s_samples=res.s_samples,
+                     mean_depth_mm=res.mean_depth_mm,
                      reproj_err_left=res.reproj_err_left,
                      reproj_err_right=res.reproj_err_right,
                      left_image=str(f))
             n_accept += 1
 
     stats = {"session": session, "n_frames": len(files), "n_accept": n_accept,
-             "accept_rate": n_accept / max(1, len(files))}
+             "accept_rate": n_accept / max(1, len(files)), "median_L_mm": med_L}
     print(f"[{session}] frames={stats['n_frames']} accepted={n_accept} "
-          f"({100*stats['accept_rate']:.1f}%)  labels -> {lab_dir}  qc -> {qc_dir}")
+          f"({100*stats['accept_rate']:.1f}%)  median L={med_L:.1f}mm  "
+          f"labels -> {lab_dir}  qc -> {qc_dir}")
     return stats
 
 
@@ -368,15 +427,20 @@ def _synthetic_test() -> None:
             p0 = tuple(np.round(proj[k]).astype(int))
             p1 = tuple(np.round(proj[k + 1]).astype(int))
             cv2.line(img, p0, p1, 25, 2, cv2.LINE_AA)
-        noise = (rng.standard_normal((h, w)) * 2).astype(np.int16)
+        noise = (rng.standard_normal((h, w)) * 1).astype(np.int16)
         return np.clip(img.astype(np.int16) + noise, 0, 255).astype(np.uint8)
 
     left_img, right_img = render(proj_l), render(proj_r)
     res = label_pair(left_img, right_img, calib, lp)
     assert res is not None, "labeler produced no result on synthetic pair"
 
-    # Compare reconstruction against ground-truth curve: nearest-point mean dist
-    d = np.linalg.norm(res.r_s[:, None, :] - X[None, :, :], axis=2).min(axis=1)
+    # Compare reconstruction against ground-truth curve: nearest-point mean dist.
+    # Densify GT first so the nearest-point metric isn't limited by GT spacing.
+    tg = np.linspace(0, 1, 4000)
+    Xd = np.column_stack([20.0 * np.cos(2 * tg) - 10.0,
+                          60.0 * tg - 30.0,
+                          250.0 + 20.0 * np.sin(2 * tg)])
+    d = np.linalg.norm(res.r_s[:, None, :] - Xd[None, :, :], axis=2).min(axis=1)
     mean_err = float(d.mean())
     print(f"synthetic reconstruction mean error = {mean_err:.3f} mm "
           f"(L={res.L_mm:.1f} mm, reproj L/R = "

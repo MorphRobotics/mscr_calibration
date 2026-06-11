@@ -9,12 +9,18 @@ capture:
   height: 720
   fps: 30
   emitter_enabled: 0         # IR dot projector OFF (rod is the only thing we image)
-  blur_var_threshold: 40.0   # Laplacian variance below this => motion-blurred, drop pair
+  blur_var_threshold: 1.0    # Laplacian variance below this => motion-blurred, drop pair
+                             # On a clean (mostly white) background the whole-image
+                             # variance is low by design: sharp rod frames sit ~2-3,
+                             # empty/badly-blurred frames near 0. This is a weak filter
+                             # in this scene; QC in the labeler is the real quality gate.
   preview_scale: 0.5         # downscale factor for the side-by-side preview window
 
 labeler:
   # --- segmentation ---
-  inv_threshold: 80          # pixels darker than this are candidate rod (8-bit grayscale)
+  inv_threshold: 40          # pixels darker than this are candidate rod (8-bit grayscale)
+                             # tuned to real IR: rod ~31, grey background ~87
+                             # (NB: the "white" sheet reads as mid-grey in IR, not bright)
   morph_kernel: 3            # structuring element size for open/close
   morph_iterations: 1
   # --- centerline ordering ---
@@ -27,8 +33,17 @@ labeler:
   n_output: 64               # uniform-arclength samples in the output r(s)
   # --- epipolar correspondence ---
   degenerate_dvds: 0.15      # |dv/ds| below this on the right curve => DEGENERATE sample
+  # --- robust triangulation ---
+  depth_min_mm: 120          # drop triangulated points nearer than this (D435 stereo floor)
+  depth_max_mm: 500          # drop triangulated points farther than this
+  max_seg_jump: 6.0          # drop a 3D point if its step from the curve is > this x median step
+                             # (kills the few bad correspondences that inflate length)
+  min_inlier_frac: 0.5       # need at least this fraction of points surviving robust filtering
   # --- QC ---
-  reproj_thresh_px: 1.0      # accept frame only if mean reproj error in BOTH views below this
+  reproj_thresh_px: 1.5      # accept frame only if mean reproj error in BOTH views below this
+                             # (1.0 was for noise-free synthetic; real IR sits ~1.0-1.1 px)
+  length_tol_frac: 0.35      # session QC: reject frames whose L deviates more than this
+                             # fraction from the session median length (rod is rigid)
 
 dataset:
   n_points: 64               # fixed centerline length for the network target
