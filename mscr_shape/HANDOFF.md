@@ -16,7 +16,7 @@ frame**; image units = px. RGB camera and IR emitter are never used.
 | 1 | `capture.py` | `python capture.py --session demo --fake --headless` (60/60 saved) | ✅ done |
 | 2 | `labeler.py` | `python labeler.py --test` → **0.486 mm** < 0.5 mm | ✅ done |
 | 3 | `dataset.py` | `python dataset.py` (config-split, shapes) | ✅ done |
-| 4 | `model.py`, `train.py` | `python train.py --overfit-test` → near-zero | ⏳ **IN PROGRESS** (see below) |
+| 4 | `model.py`, `train.py` | `python train.py --overfit-test` → **0.674 mm** < 1.0 mm | ✅ done |
 | 5 | `infer.py` | `python infer.py --export-onnx` → diff ~1e-6 | ✅ done (ONNX path) |
 
 ### Phase 4 — the one open item
