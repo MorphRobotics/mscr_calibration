@@ -8,6 +8,8 @@ __pycache__/
 mscr_shape/data/
 mscr_shape/checkpoints/
 mscr_shape/calib_stereo.yaml
+mscr_shape/viz3d_*.gif
+mscr_shape/viz3d_*.npz
 
 # OS / editor
 .DS_Store
