@@ -1,0 +1,14 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Regenerable mscr_shape artifacts (synthetic test data, trained weights)
+mscr_shape/data/
+mscr_shape/checkpoints/
+mscr_shape/calib_stereo.yaml
+
+# OS / editor
+.DS_Store
+*.swp

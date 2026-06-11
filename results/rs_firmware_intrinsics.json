@@ -1,0 +1,53 @@
+{
+  "left_ir": {
+    "width": 1280,
+    "height": 720,
+    "fx": 639.5079345703125,
+    "fy": 639.5079345703125,
+    "cx": 642.8848266601562,
+    "cy": 355.6504211425781,
+    "distortion_model": "distortion.brown_conrady",
+    "distortion_coeffs": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "right_ir": {
+    "width": 1280,
+    "height": 720,
+    "fx": 639.5079345703125,
+    "fy": 639.5079345703125,
+    "cx": 642.8848266601562,
+    "cy": 355.6504211425781,
+    "distortion_model": "distortion.brown_conrady",
+    "distortion_coeffs": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "depth_scale_m_per_unit": 0.0010000000474974513,
+  "firmware_extrinsics": {
+    "rotation": [
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ],
+    "translation": [
+      -0.04993833601474762,
+      0.0,
+      0.0
+    ]
+  }
+}

@@ -1,0 +1,40 @@
+calibration_date: '2026-06-03T11:46:27'
+board:
+  cols_squares: 10
+  rows_squares: 15
+  inner_corners:
+  - 9
+  - 14
+  square_size_mm: 25.0
+image_size:
+  width: 1280
+  height: 720
+camera_matrix:
+  rows: 3
+  cols: 3
+  data:
+  - 892.0800082755807
+  - 0.0
+  - 646.6473502700455
+  - 0.0
+  - 893.9316828516809
+  - 367.619592077559
+  - 0.0
+  - 0.0
+  - 1.0
+dist_coeffs:
+  description: k1 k2 p1 p2 k3
+  rows: 1
+  cols: 5
+  data:
+  - 0.10766177284968154
+  - -0.4633100452984836
+  - 0.007153871751218499
+  - 0.005674469328336437
+  - 0.4272405663951571
+rms_reprojection_error_px: 0.733622
+num_images_used: 42
+field_of_view_deg:
+  horizontal: 71.313
+  vertical: 43.871
+depth_scale_m_per_unit: 0.0010000000474974513

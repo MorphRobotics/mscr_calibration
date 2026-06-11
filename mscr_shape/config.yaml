@@ -1,0 +1,63 @@
+# mscr_shape — central parameters. All 3D units in mm, image units in px.
+
+paths:
+  calib: calib_stereo.yaml   # stereo IR calib; generate via: python calib.py --from-device --save calib_stereo.yaml
+  data_root: data            # holds raw/, qc/, labels/
+
+capture:
+  width: 1280
+  height: 720
+  fps: 30
+  emitter_enabled: 0         # IR dot projector OFF (rod is the only thing we image)
+  blur_var_threshold: 40.0   # Laplacian variance below this => motion-blurred, drop pair
+  preview_scale: 0.5         # downscale factor for the side-by-side preview window
+
+labeler:
+  # --- segmentation ---
+  inv_threshold: 80          # pixels darker than this are candidate rod (8-bit grayscale)
+  morph_kernel: 3            # structuring element size for open/close
+  morph_iterations: 1
+  # --- centerline ordering ---
+  base_side: bottom          # which image side the rod base enters from: bottom/top/left/right
+  # --- spline / resampling ---
+  spline_smooth_2d: 5.0      # smoothing factor s for the 2D centerline spline
+  resample_2d: 200           # dense 2D samples per view
+  normal_halfwidth: 4        # px to each side when doing intensity-weighted subpixel refine
+  spline_smooth_3d: 1.0      # smoothing factor for the 3D spline (mm^2 scale)
+  n_output: 64               # uniform-arclength samples in the output r(s)
+  # --- epipolar correspondence ---
+  degenerate_dvds: 0.15      # |dv/ds| below this on the right curve => DEGENERATE sample
+  # --- QC ---
+  reproj_thresh_px: 1.0      # accept frame only if mean reproj error in BOTH views below this
+
+dataset:
+  n_points: 64               # fixed centerline length for the network target
+  config_grid_mm: 5.0        # tip-position grid size for configuration clustering
+  split: [0.7, 0.15, 0.15]   # train / val / test fraction of CONFIGURATION clusters
+  seed: 0
+  # photometric augmentation only (NO geometric — labels are metric 3D)
+  aug:
+    brightness: 0.2
+    contrast: 0.2
+    blur_sigma_max: 1.5
+    blur_prob: 0.3
+  image_size: [288, 512]     # network input H, W (left-IR rectified, downscaled)
+
+model:
+  n_points: 64
+  pretrained: true           # ImageNet weights for the ResNet18 backbone
+
+train:
+  batch_size: 8
+  epochs: 50
+  lr: 0.0003
+  weight_decay: 0.0001
+  lambda_length: 0.1         # weight of the length MSE term
+  num_workers: 4
+  ckpt: checkpoints/mscr_shape.pt
+
+infer:
+  ema_alpha: 0.6             # EMA weight on the new prediction (1.0 = no smoothing)
+  max_jump_mm: 15.0          # reject frame if tip jumps more than this from smoothed tip
+  onnx_path: checkpoints/mscr_shape.onnx
+  onnx_tol: 0.001            # max abs diff allowed between torch and onnxruntime outputs
