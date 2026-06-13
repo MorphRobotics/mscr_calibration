@@ -27,19 +27,36 @@ from dataset import build_datasets
 from model import MoSSNet, shape_errors
 
 
-def loss_fn(pred_pts, pred_L, gt_pts, gt_L, lam):
+def loss_fn(pred_pts, pred_L, gt_pts, gt_L, lam, axis_w=None):
     mse = nn.functional.mse_loss
-    return mse(pred_pts, gt_pts) + lam * mse(pred_L, gt_L)
+    if axis_w is None:
+        pt = mse(pred_pts, gt_pts)
+    else:
+        # Per-axis reweighting: divide each coordinate residual by that axis'
+        # train-set std so the small in-plane bending (X,Y) contributes to the
+        # gradient comparably to the large depth offset (Z). Without this the
+        # network nails Z in one epoch and parks at the mean in-plane shape,
+        # so the reconstructed rod looks rigid (no apparent elastic bending).
+        pt = (((pred_pts - gt_pts) * axis_w) ** 2).mean()
+    return pt + lam * mse(pred_L, gt_L)
 
 
 @torch.no_grad()
-def evaluate(net, loader, device, lam) -> Tuple[float, float, float]:
+def compute_axis_weight(ds, device) -> torch.Tensor:
+    """1/std per coordinate axis over the train-set targets (mm)."""
+    pts = torch.stack([ds[i][1] for i in range(len(ds))])  # (M, N, 3)
+    std = pts.reshape(-1, 3).std(dim=0).clamp_min(1e-3)
+    return (1.0 / std).to(device)
+
+
+@torch.no_grad()
+def evaluate(net, loader, device, lam, axis_w=None) -> Tuple[float, float, float]:
     net.eval()
     tot_loss, tot_me, tot_te, n = 0.0, 0.0, 0.0, 0
     for img, r_s, L in loader:
         img, r_s, L = img.to(device), r_s.to(device), L.to(device)
         pts, Lp = net(img)
-        tot_loss += loss_fn(pts, Lp, r_s, L, lam).item() * len(img)
+        tot_loss += loss_fn(pts, Lp, r_s, L, lam, axis_w).item() * len(img)
         me, te = shape_errors(pts, r_s)
         tot_me += me.item() * len(img)
         tot_te += te.item() * len(img)
@@ -64,6 +81,13 @@ def train(cfg: dict) -> None:
     lam = tc["lambda_length"]
     patience = tc.get("early_stop_patience", 0)  # 0 disables early stopping
 
+    # Per-axis target normalization (handoff #1 fix: makes the elastic in-plane
+    # bending learnable instead of swamped by the depth offset).
+    axis_w = compute_axis_weight(tr_ds, device) if tc.get("normalize_targets", True) else None
+    if axis_w is not None:
+        std = (1.0 / axis_w).cpu().numpy()
+        print(f"target per-axis std (mm): X={std[0]:.1f} Y={std[1]:.1f} Z={std[2]:.1f}")
+
     ckpt = Path(__file__).parent / tc["ckpt"]
     ckpt.parent.mkdir(parents=True, exist_ok=True)
     best = float("inf")
@@ -74,16 +98,17 @@ def train(cfg: dict) -> None:
             img, r_s, L = img.to(device), r_s.to(device), L.to(device)
             opt.zero_grad()
             pts, Lp = net(img)
-            loss = loss_fn(pts, Lp, r_s, L, lam)
+            loss = loss_fn(pts, Lp, r_s, L, lam, axis_w)
             loss.backward()
             opt.step()
         sched.step()
-        vl, vme, vte = evaluate(net, va, device, lam)
+        vl, vme, vte = evaluate(net, va, device, lam, axis_w)
         flag = ""
         if vme < best:
             best = vme
             since_best = 0
-            torch.save({"model": net.state_dict(), "config": cfg}, ckpt)
+            torch.save({"model": net.state_dict(), "config": cfg,
+                        "axis_std": (1.0 / axis_w).cpu() if axis_w is not None else None}, ckpt)
             flag = " *"
         else:
             since_best += 1
@@ -95,7 +120,7 @@ def train(cfg: dict) -> None:
 
     # final test metrics with the best checkpoint
     net.load_state_dict(torch.load(ckpt, map_location=device)["model"])
-    _, tme, tte = evaluate(net, te, device, lam)
+    _, tme, tte = evaluate(net, te, device, lam, axis_w)
     print(f"\nTEST  mean along-body error = {tme:.2f} mm   tip error = {tte:.2f} mm")
     print(f"best checkpoint: {ckpt}")
 

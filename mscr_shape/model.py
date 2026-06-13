@@ -33,11 +33,21 @@ class MoSSNet(nn.Module):
                 new.weight.copy_(old.weight.mean(dim=1, keepdim=True))
         backbone.conv1 = new
 
-        self.encoder = nn.Sequential(*list(backbone.children())[:-1])  # -> (B,512,1,1)
+        # Drop the backbone's final global-average-pool + fc: average pooling
+        # destroys spatial location, but the rod's in-plane bending IS spatial
+        # location. Keep the (B,512,h',w') feature map instead so the point head
+        # can see WHERE the rod is, not just texture statistics. Without this the
+        # net only learns depth and predicts a near-rigid rod (no apparent bend).
+        self.encoder = nn.Sequential(*list(backbone.children())[:-2])  # -> (B,512,h',w')
+        # 3x4 coarse position grid: divides the 9x16 (for 288x512 input) feature
+        # map evenly so ONNX export of adaptive_avg_pool2d is supported.
+        self.grid = (3, 4)
+        self.spatial_pool = nn.AdaptiveAvgPool2d(self.grid)            # coarse position grid
+        self.gap = nn.AdaptiveAvgPool2d((1, 1))                        # global feat for length
         feat = 512
 
         self.point_head = nn.Sequential(
-            nn.Linear(feat, 512), nn.ReLU(inplace=True), nn.Dropout(0.2),
+            nn.Linear(feat * self.grid[0] * self.grid[1], 512), nn.ReLU(inplace=True), nn.Dropout(0.2),
             nn.Linear(512, 256), nn.ReLU(inplace=True),
             nn.Linear(256, n_points * 3),
         )
@@ -47,9 +57,11 @@ class MoSSNet(nn.Module):
         )
 
     def forward(self, x: torch.Tensor):
-        f = self.encoder(x).flatten(1)              # (B, 512)
-        pts = self.point_head(f).view(-1, self.n_points, 3)
-        length = self.length_head(f)                # (B, 1)
+        fmap = self.encoder(x)                          # (B, 512, h', w')
+        spatial = self.spatial_pool(fmap).flatten(1)    # (B, 512*4*4) — keeps position
+        glob = self.gap(fmap).flatten(1)                # (B, 512)
+        pts = self.point_head(spatial).view(-1, self.n_points, 3)
+        length = self.length_head(glob)                 # (B, 1)
         return pts, length
 
 

@@ -69,6 +69,8 @@ train:
   lr: 0.0003
   weight_decay: 0.0001
   lambda_length: 0.1         # weight of the length MSE term
+  normalize_targets: true    # per-axis 1/std reweight of point loss so in-plane
+                             # bending (X,Y) isn't swamped by the depth offset (Z)
   num_workers: 4
   early_stop_patience: 15    # stop if val mean error doesn't improve for N epochs (0=off)
   ckpt: checkpoints/mscr_shape.pt

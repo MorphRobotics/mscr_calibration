@@ -10,6 +10,12 @@ GitHub: MorphRobotics/mscr_calibration (PRIVATE), branch `master`. Commit & push
 > in-plane bending (X,Y)** — it underfits and predicts a near-mean shape. **The #1 open task
 > is fixing that underfit.** Leading hypothesis + planned experiment are in the
 > "Session-2 model diagnosis" section below. Jump there.
+>
+> 🟢 **SESSION 3 UPDATE — underfit FIXED + clamped-base data working.** Bending is
+> now tracked (X corr +0.99, Z +0.99; TEST 3.04mm/5.31mm tip on clamped sessions
+> s09-s11). See "SESSION 3 LOG" at the bottom. Current checkpoint matches the
+> (3,4) model and is trained on s09+s10+s11. ONE weak axis remains: **Y tip motion
+> under-tracked (corr +0.22)** — the new #1 open task.
 
 ---
 
@@ -229,3 +235,137 @@ tip (red) + accumulating tip path; also dumps `<out>.npz` (r_s_seq [T,64,3], tip
 - `viz3d_*.gif/.npz` are working-output files in the project dir (not gitignored;
   large — consider not committing the 15 MB ones).
 - gitignore excludes `data/`, `checkpoints/`, `calib_stereo.yaml`.
+
+================================================================================
+# SESSION 3 LOG — fixed the in-plane underfit (the "elastic shape not apparent")
+================================================================================
+
+Goal: make the elastic bending / shape change apparent in the 3D reconstruction
+(session-2's #1 open problem: model tracked depth Z but predicted a near-rigid
+in-plane shape, X/Y tip corr ~ -0.2 / -0.4).
+
+## Two changes made (both committed in working tree; NOT yet git-committed)
+1. **Per-axis target normalization** (`train.py`): `loss_fn` now takes `axis_w`
+   = 1/std-per-axis computed from the TRAIN targets (`compute_axis_weight`), so
+   the small in-plane (X,Y) residuals aren't swamped by the large depth offset.
+   Toggle: `config.yaml train.normalize_targets: true`. Checkpoint also stores
+   `axis_std`. Train-set std came out X=6.4 Y=13.9 Z=6.0 mm.
+   - Result ALONE: helped error a little (4.66/6.45) but did NOT fix bending
+     (X corr -0.09, Y -0.38, pred span ~0). This matched the handoff's
+     "if normalization alone doesn't fix it" contingency.
+2. **Spatial head — THE REAL FIX** (`model.py`): the ResNet18 encoder ended in
+   global average pooling, which destroys spatial location — but in-plane
+   bending *is* location. Now the encoder stops before avgpool (`children[:-2]`)
+   and the point head reads an `AdaptiveAvgPool2d(grid)`-flattened feature that
+   preserves a coarse position grid. Length head still uses a global-pool feat.
+   - `self.grid = (3, 4)` chosen because the 9x16 feature map (for 288x512 input)
+     must divide evenly or ONNX export of adaptive_avg_pool2d FAILS. (Tried (4,4)
+     first — trained great but `infer.py --export-onnx` errored: "output size not
+     a factor of input size", since 9 % 4 != 0. (3,4) divides 9 and 16.)
+
+## Measured improvement (s03 tip corr, via the corr script — see below)
+With spatial head **(4,4)** + normalization, TEST 4.04mm / 5.06mm tip:
+| axis | before (session 2) | after |
+|------|--------------------|-------|
+| X corr | -0.22 | **+0.86** |
+| Y corr | -0.36 | **+0.49** |
+| Z corr |  0.86 | +0.88 |
+Pred X tip span went 1.1mm -> 14.6mm (GT 52.9mm). Bending is now clearly
+tracked — the elastic shape change is apparent. (Span still under-shoots GT =
+classic regression-to-the-mean; the durable cure is more consistent multi-pose
+data, as already noted.)
+
+## ⚠️ STATE AT PAUSE — DO THIS FIRST NEXT SESSION
+- The `(3,4)`-grid retrain was INTERRUPTED. So `checkpoints/mscr_shape.pt` on
+  disk is the **(4,4)** model and will NOT load into the current `model.py`.
+  **Run `python train.py` once** to regenerate a matching checkpoint (~3-4 min
+  on the GPU, 50 epochs). Expect TEST ~4-5mm mean / ~5-6mm tip.
+- Then re-confirm bending with the corr script and regenerate the viz GIF:
+  `python infer.py --session s03 --viz3d --out viz3d_s03_fixed.gif --stride 4`
+- Then `python infer.py --export-onnx` (should now pass with the (3,4) grid).
+- `python train.py --overfit-test` still uses `loss_fn` with no axis_w (unchanged
+  path) but DOES exercise the new model — confirm it still crosses <1mm.
+
+## corr script (re-measure X/Y/Z tip correlation on s03)
+Load `checkpoints/mscr_shape.pt`, build `MSCRShapeDataset` over
+`data/labels/s03/*.npz` (augment=False), predict each frame, then per axis print
+`np.corrcoef(pred_tip[:,a], gt_tip[:,a])`. Success = X corr > 0.7. (Full script
+was run from the package dir this session; trivial to reconstruct.)
+
+## Files changed this session (uncommitted)
+`model.py` (spatial head), `train.py` (axis_w normalization), `config.yaml`
+(`normalize_targets`). Nothing else touched.
+
+================================================================================
+# SESSION 3 LOG (cont.) — clamped-base data + region-grow labeler
+================================================================================
+
+## Capture: base is now CLAMPED (sessions s09, s10, s11)
+USB had dropped to 2.0 ("Couldn't resolve requests" at 1280x720@30); fixed by
+reconnecting on USB 3 (cable/port — many USB-C cables are USB2-only). Then
+captured s09/s10/s11 (~900-1030 frames each) with the rod clamped to a fixed
+base, mostly vertical, varied bend + distance.
+
+## Labeler problem found: background clutter beat the rod
+With the clamp scene, the global "most-elongated component" locked onto STRAIGHT
+BACKGROUND EDGES (table/desk lip = horizontal; grey-board edge + door molding =
+vertical) instead of the short curved rod. Symptoms: bogus median L=256mm,
+per-session L wildly inconsistent (7.8 / 93.5 / 61.3 mm). Diagnosed by viewing
+data/qc/<s>/*.jpg overlays — the traced curve sat on the table edge / board edge.
+
+Fixes added to labeler.py (all committed in working tree, NOT git-committed):
+1. **Orientation + border gate** in `_pick_rod_component` (keyed to base_side):
+   a bottom/top base => VERTICAL rod, reject horizontal blobs (table lip) and
+   blobs touching the left/right borders. Helped s10 but not s09/s11 (they had a
+   competing *vertical* board edge).
+2. **Activity ROI** (`compute_activity_roi`, temporal-std) — ABANDONED / default
+   OFF (`use_activity_roi: false`): the moving hand+magnet and a bright window
+   out-moved the rod, so the ROI landed on them. Code left in place, disabled.
+3. **THE FIX — base-anchor region-grow** (user picked this). The clamp base is a
+   FIXED pixel, so:
+   - `python labeler.py --session <s> --set-base` opens the rectified LEFT then
+     RIGHT view; click the rod base in each (ENTER ok / r redo / q abort). Saved
+     to `data/raw/<s>/base_anchor.json` {left:[x,y], right:[x,y]}. One per session.
+   - `_pick_component_at_anchor` selects the connected component CONTAINING the
+     anchor (nearest fg pixel within 50px if it lands in a gap). Background edges,
+     hand, window are separate components => ignored.
+   - `order_skeleton(..., anchor)` picks the base endpoint nearest the anchor.
+   - `_select_component` dispatches: anchor region-grow if anchor set, else the
+     orientation/elongation heuristic. ROI gate still applied first (now off).
+   - A headless `--base-left x y --base-right x y` was offered but NOT added (user
+     used the GUI). Add it if a future session is headless.
+
+## RESULT — labels are now clean AND length-consistent across sessions
+| session | accept | median L |
+|---------|--------|----------|
+| s09 | 90.4% | 45.9 mm |
+| s10 | 100%  | 44.6 mm |
+| s11 | 100%  | 45.0 mm |
+The rigid rod finally reconstructs to the SAME ~45mm everywhere (clamped base =
+no occlusion-length variation). reproj errors ~0.12-0.4 px. So combining sessions
+now HELPS. (s03's 55mm came from a hand-held/occluded base — INCONSISTENT with
+the clamped truth, so s03 was PARKED to /tmp/mscr_labels_park/s03. data/labels/
+holds s09/s10/s11 only.)
+
+## MODEL retrained on s09+s10+s11 (split 1850/501/427)
+TEST **3.04 mm mean / 5.31 mm tip** (best yet). Bending correlation (tip, n=926):
+| axis | pred span | GT span | corr |
+|------|-----------|---------|------|
+| X (lateral bend) | 60.2 | 67.8 | +0.99 |
+| Y (vertical/along-axis) | 3.5 | 58.5 | +0.22 |
+| Z (depth) | 110.2 | 126.7 | +0.99 |
+X and Z near-perfect with MATCHING span (no more mean-collapse) — the elastic
+bend is apparent. Viz: `viz3d_s11_clamped.gif`.
+
+## ⚠️ NEW #1 OPEN TASK — Y tip axis under-tracked (corr +0.22, span 3.5/58.5mm)
+X (lateral) and Z (depth) are solved; Y is not. Y tip motion runs ~along the
+rod's near-vertical image axis (foreshortening) — the hardest DOF to see
+monocularly. Ideas to try next: (a) check whether Y bending is even visually
+present/separable in the images (it may be partly degenerate); (b) per-axis loss
+weight is already 1/std (Y std 12.0 ~ X std 9.6, so it's NOT a loss-weighting
+issue — the signal/observability is the suspect); (c) capture a session that
+deliberately bends in the camera-vertical plane; (d) tighter ROI crop / higher
+input res around the rod. Re-measure with the corr script over s09/s10/s11.
+
+## Files changed this session (uncommitted): model.py, train.py, config.yaml,
+labeler.py. New per-session files: data/raw/<s>/base_anchor.json.
