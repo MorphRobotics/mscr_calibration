@@ -65,7 +65,7 @@ python infer.py --export-onnx                # export + verify ONNX
 - `config.yaml` — every tunable parameter (single source of truth).
 - `calib.yaml` — stereo calibration (intrinsics, distortion `k1,k2,k3,p1,p2`,
   extrinsics `R`,`T` in mm, image size). **Placeholder values shipped — replace
-  with your real D435 calibration.**
+  with real D435 calibration.**
 - `data/raw/<session>/` — captured PNG pairs + `manifest.json`.
 - `data/qc/<session>/` — per-frame ACCEPT/REJECT overlay JPEGs.
 - `data/labels/<session>/` — per-accepted-frame NPZ (`r_s`, `L_mm`, …).
