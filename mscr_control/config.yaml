@@ -1,0 +1,95 @@
+# mscr_control — closed-loop MSCR tip circle via UR5e magnet manipulation.
+# All distances in METRES, angles in RADIANS, in the UR base frame unless noted.
+
+robot:
+  ip: "192.168.1.102"         # UR5e (RTDE). Host must be on 192.168.1.x (enp3s0).
+  tcp_speed: 0.05             # m/s  (moveL) — keep slow near the workspace
+  tcp_accel: 0.3              # m/s^2
+  # Fixed tool orientation held during the whole trace (rotvec, base frame).
+  # Default = magnet pointing down, matching mscr_inv_control's [0, 3.14, 0].
+  tool_rotvec: [0.0, 3.14159, 0.0]
+  # Attachment tip offset from the pendant TCP, in the TOOL frame (m). The
+  # attachment sticks out along tool +Z by this length. *** CONFIRM: 0.097 m
+  # (97 mm) — NOT 0.97 m, which exceeds the robot's reach. ***
+  # Applied orientation-aware: tip_base = T_base_tool0 * [offset, 1].
+  tool_tip_offset_m: [0.0, 0.0, 0.097]
+  # Hard Cartesian safety box for the magnet/TCP (base frame). Commands are
+  # CLAMPED to this box. Defaults below bracket the inverse model's magnet
+  # workspace (orbit of radius R_min..R_min+R_span about cat_tip_center, at
+  # z = cat_tip_center.z + z_rel_mag = -0.178 m). *** VERIFY/EDIT for your real
+  # cell before any motion — a wrong box silently clamps away the trajectory. ***
+  workspace_min: [-0.40, -0.70, -0.30]
+  workspace_max: [ 0.10, -0.20, -0.05]
+
+magnet_model:
+  # Reused from the magnetcontrol_ws magnet_control package (proven mapping).
+  onnx: "/home/dozie/magnetcontrol_ws/src/magnet_control/magnet_control/mscr_inverse_model.onnx"
+  norm: "/home/dozie/magnetcontrol_ws/src/magnet_control/magnet_control/inv_norm3.mat"
+  # Magnet workspace mapping (must match mscr_inv_control.py):
+  cat_tip_center: [-0.14397, -0.43562, -0.24807]   # base frame (m)
+  z_rel_mag: 0.07
+  B_min: 0.001
+  B_max: 0.05
+  R_min: 0.05                 # magnet orbit radius at B_min (m)
+  R_span: 0.15               # added radius span up to B_max (m)
+
+handeye:
+  # Produced by handeye_calibrate.py — T_base_camera (4x4), camera expressed in base.
+  transform_file: "results/T_base_camera.npz"
+  # Calibration target rigidly attached to the robot tool flange.
+  target:
+    type: "checkerboard"      # 'checkerboard' (plain) or 'charuco'
+    # --- checkerboard: count INNER corners (squares-1 in each direction) ---
+    # Detected by debug_board.py (SB detector): 10x9 INNER corners (11x10 squares).
+    cols: 10                  # inner corners along the long side
+    rows: 9                   # inner corners along the short side
+    square_len_m: 0.025       # 25 mm squares
+    # --- charuco only (ignored for checkerboard) ---
+    squares_x: 5
+    squares_y: 7
+    marker_len_m: 0.018
+    aruco_dict: "DICT_5X5_1000"
+  n_poses: 12                 # robot poses to sample during calibration
+
+camera:
+  width: 848
+  height: 480
+  fps: 30
+  laser_power: 0             # emitter off (dark rod) — matches mscr_tracker default
+
+tracker:
+  # Overrides for mscr_tracker.TrackerParams during tip sensing. Tighten the
+  # depth gate to the rod's distance so far clutter (partitions, furniture) and
+  # anything beyond the rod is ignored. *** REMOVE the checkerboard from view for
+  # tip sensing — it is a large dark distractor. ***
+  depth_max_m: 0.6           # ignore anything farther than this (~rod dist + margin)
+  depth_min_m: 0.15
+  dark_threshold: 85         # rod-dark cutoff; lower if rod faint, raise if bg leaks
+  entry: "bottom"            # rod base is clamped at the BOTTOM (stand); tip is up
+  tip_image_side: "top"      # the FREE TIP is the topmost point in the image
+                             # (override of the tracker's base/tip choice; use
+                             # bottom/left/right if the rod points another way)
+
+approach:
+  # Safety box for the approach-the-tip demo (base frame, near the rod / table).
+  # Separate from the magnet-circle box above. The robot's own safety-limits
+  # check is the authoritative gate; this box is a coarse sanity bound.
+  standoff_m: 0.05
+  workspace_min: [-0.45, -0.95, 0.00]
+  workspace_max: [ 0.45, -0.30, 0.80]
+  max_move_m: 0.60           # refuse if the commanded move exceeds this distance
+
+circle:
+  radius_m: 0.005            # MSCR TIP circle radius (start small; tip workspace is small)
+  plane: "base_xy"          # 'base_xy' | 'base_xz' | 'base_yz' — plane of the tip circle
+  revolutions: 1.0
+  steps_per_rev: 36
+  # Center of the tip circle: 'current_tip' (sensed at start) or explicit [x,y,z] base.
+  center: "current_tip"
+
+control:
+  kp: 0.6                     # proportional feedback gain on tip error (dimensionless)
+  lpf_alpha: 0.2             # magnet-position low-pass (matches mscr_inv_control)
+  pos_tol_m: 0.0015          # tip-error tolerance to advance to next waypoint
+  max_iter_per_waypoint: 4   # feedback iterations before advancing anyway
+  settle_s: 0.8              # wait after each magnet move for the MSCR to settle
